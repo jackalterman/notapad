@@ -126,7 +126,7 @@ def open_replace(app):
     top.resizable(False, False)
     top.transient(app.root)
     app.search_window = top
-    
+
     t = app.current_theme
     top.configure(bg=t["bg_editor"])
 
@@ -136,7 +136,8 @@ def open_replace(app):
     footer.pack(side=tk.BOTTOM, fill=tk.X)
 
     lbl_opts = {"bg":t["bg_editor"], "fg":t["fg_editor"], "font":("Segoe UI", 10)}
-    ent_opts = {"bg":t.get("bg_input", t["bg_gutter"]), "fg":t["fg_editor"], "insertbackground":t["fg_editor"], "relief":tk.FLAT, "bd":4, "font":("Segoe UI", 10)}
+    ent_opts = {"bg":t.get("bg_input", t["bg_gutter"]), "fg":t["fg_editor"],
+                "insertbackground":t["fg_editor"], "relief":tk.FLAT, "bd":4, "font":("Segoe UI", 10)}
 
     tk.Label(body, text="Find what:", anchor="w", **lbl_opts).grid(row=0, column=0, sticky="w", pady=(0,4))
     fv = tk.StringVar(value=app.search_last_term)
@@ -149,26 +150,61 @@ def open_replace(app):
     rep_ent = tk.Entry(body, textvariable=rv, width=32, **ent_opts)
     rep_ent.grid(row=3, column=0, sticky="ew", pady=(0, 15))
 
-    chk_opts = {"bg":t["bg_editor"], "fg":t["fg_editor"], "selectcolor":t["bg_status"], 
+    chk_opts = {"bg":t["bg_editor"], "fg":t["fg_editor"], "selectcolor":t["bg_status"],
                 "activebackground":t["bg_editor"], "activeforeground":t["accent"], "font":("Segoe UI", 9)}
-    
+
     opt_f = tk.Frame(body, bg=t["bg_editor"])
     opt_f.grid(row=4, column=0, sticky="w")
-    tk.Checkbutton(opt_f, text="Match case", variable=app.search_case, **chk_opts).grid(row=0, column=0, sticky="w", padx=(0,10))
-    tk.Checkbutton(opt_f, text="Regex", variable=app.search_regex, **chk_opts).grid(row=0, column=1, sticky="w", padx=10)
-    tk.Checkbutton(opt_f, text="Whole word", variable=app.search_whole, **chk_opts).grid(row=0, column=2, sticky="w", padx=10)
+    tk.Checkbutton(opt_f, text="Match case",  variable=app.search_case,  **chk_opts).grid(row=0, column=0, sticky="w", padx=(0, 10))
+    tk.Checkbutton(opt_f, text="Regex",       variable=app.search_regex, **chk_opts).grid(row=0, column=1, sticky="w", padx=10)
+    tk.Checkbutton(opt_f, text="Whole word",  variable=app.search_whole, **chk_opts).grid(row=0, column=2, sticky="w", padx=10)
 
-    app.search_count_lbl = tk.Label(body, text="", font=("Segoe UI", 9, "italic"), bg=t["bg_editor"], fg=t["accent"], anchor="w")
-    app.search_count_lbl.grid(row=5, column=0, sticky="w", pady=(15,0))
+    # E12 — "In selection" checkbox: pre-ticked when the dialog opens with an active selection
+    has_selection = False
+    try:
+        app.text.index(tk.SEL_FIRST)
+        has_selection = True
+    except tk.TclError:
+        pass
+    in_sel_var = tk.BooleanVar(value=has_selection)
+    tk.Checkbutton(opt_f, text="In selection", variable=in_sel_var,
+                   **chk_opts).grid(row=0, column=3, sticky="w", padx=10)
+
+    app.search_count_lbl = tk.Label(body, text="", font=("Segoe UI", 9, "italic"),
+                                    bg=t["bg_editor"], fg=t["accent"], anchor="w")
+    app.search_count_lbl.grid(row=5, column=0, sticky="w", pady=(15, 0))
+
+    # ── helpers ────────────────────────────────────────────────────────────────
+
+    def _build_pattern(term):
+        """Return (pattern, flags) from the current option checkboxes."""
+        flags = 0 if app.search_case.get() else re.IGNORECASE
+        if app.search_whole.get() and not app.search_regex.get():
+            return r'\b' + re.escape(term) + r'\b', flags
+        elif app.search_whole.get() and app.search_regex.get():
+            return r'\b(?:' + term + r')\b', flags
+        elif not app.search_regex.get():
+            return re.escape(term), flags
+        return term, flags
 
     def do_find():
         if fv.get(): app._do_search(fv.get())
 
     def do_replace():
         if not fv.get(): return
-        if not app._match_positions: app._do_search(fv.get())
+        if not app._match_positions:
+            app._do_search(fv.get())
         if app._match_positions:
             s, e = app._match_positions[app._match_current]
+            # E12 — if in_selection, only replace matches that lie within the selection
+            if in_sel_var.get():
+                try:
+                    sel_start = app.text.index(tk.SEL_FIRST)
+                    sel_end   = app.text.index(tk.SEL_LAST)
+                    if app.text.compare(s, "<", sel_start) or app.text.compare(s, ">=", sel_end):
+                        return  # current match is outside the selection — skip
+                except tk.TclError:
+                    pass
             app.text.delete(s, e)
             app.text.insert(s, rv.get())
             app._do_search(fv.get())
@@ -176,25 +212,48 @@ def open_replace(app):
     def do_replace_all():
         term = fv.get()
         if not term: return
-        content = app.text.get("1.0", tk.END)
-        flags = 0 if app.search_case.get() else re.IGNORECASE
-        pattern = term
-        if app.search_whole.get() and not app.search_regex.get():
-            pattern = r'\b' + re.escape(term) + r'\b'
-        elif app.search_whole.get() and app.search_regex.get():
-            pattern = r'\b(?:' + term + r')\b'
-        elif not app.search_regex.get():
-            pattern = re.escape(term)
 
+        pattern, flags = _build_pattern(term)
+
+        # E12 — scope to selection when "In selection" is checked
+        if in_sel_var.get():
+            try:
+                sel_start = app.text.index(tk.SEL_FIRST)
+                sel_end   = app.text.index(tk.SEL_LAST)
+            except tk.TclError:
+                messagebox.showwarning(APP_NAME, "No text is selected.", parent=top)
+                return
+            content = app.text.get(sel_start, sel_end)
+            try:
+                matches = re.findall(pattern, content, flags=flags)
+                count   = len(matches)
+                if count == 0:
+                    messagebox.showinfo(APP_NAME, "No matches found in selection.", parent=top)
+                    return
+                new_content = re.sub(pattern, rv.get().replace("\\", "\\\\"), content, flags=flags)
+                app.text.config(autoseparators=False)
+                app.text.edit_separator()
+                app.text.delete(sel_start, sel_end)
+                app.text.insert(sel_start, new_content)
+                app.text.edit_separator()
+                app.text.config(autoseparators=True)
+                app._clear_highlights()
+                messagebox.showinfo(APP_NAME, f"{count} replacement(s) made in selection.", parent=top)
+            except Exception as e:
+                app.text.config(autoseparators=True)
+                messagebox.showerror("Regex Error", str(e), parent=top)
+            return
+
+        # Full-document replace (original behaviour)
+        content = app.text.get("1.0", tk.END)
         try:
             matches = re.findall(pattern, content, flags=flags)
-            count = len(matches)
+            count   = len(matches)
             if count == 0:
                 messagebox.showinfo(APP_NAME, "No matches found.", parent=top)
                 return
             new_content = re.sub(pattern, rv.get().replace("\\", "\\\\"), content, flags=flags)
-            # Bracket the replacement as a single undoable unit so the undo stack
-            # is preserved. One Ctrl+Z will reverse the entire Replace All.
+            # Bracket as a single undoable unit — one Ctrl+Z undoes the whole replace.
             app.text.config(autoseparators=False)
             app.text.edit_separator()
             app.text.delete("1.0", tk.END)
@@ -204,7 +263,7 @@ def open_replace(app):
             app._clear_highlights()
             messagebox.showinfo(APP_NAME, f"{count} replacement(s) made.", parent=top)
         except Exception as e:
-            app.text.config(autoseparators=True)  # always restore on error
+            app.text.config(autoseparators=True)
             messagebox.showerror("Regex Error", str(e), parent=top)
 
     def on_type(*_):
@@ -213,18 +272,18 @@ def open_replace(app):
 
     fv.trace_add("write", on_type)
 
-    _create_styled_button(footer, "Cancel", top.destroy, t).pack(side=tk.RIGHT, padx=5)
-    _create_styled_button(footer, "Replace All", do_replace_all, t).pack(side=tk.RIGHT, padx=5)
-    _create_styled_button(footer, "Replace", do_replace, t, is_primary=True).pack(side=tk.RIGHT, padx=5)
-    
+    _create_styled_button(footer, "Cancel",      top.destroy,     t).pack(side=tk.RIGHT, padx=5)
+    _create_styled_button(footer, "Replace All",  do_replace_all,  t).pack(side=tk.RIGHT, padx=5)
+    _create_styled_button(footer, "Replace",      do_replace,      t, is_primary=True).pack(side=tk.RIGHT, padx=5)
+
     apply_windows_title_bar(top, _is_dark_mode(app))
     top.update_idletasks()
     app._center_window(top)
     app._do_search(fv.get())
-    
+
     def _cleanup():
         app.search_count_lbl = None
-        app.search_window = None
+        app.search_window    = None
         app._clear_highlights()
     top.protocol("WM_DELETE_WINDOW", lambda: (top.destroy(), _cleanup()))
     top.bind("<Escape>", lambda e: top.destroy())

@@ -23,6 +23,8 @@ class SettingsManager:
             "use_spaces":        True,
             # E9 — recent files MRU
             "recent_files":      [],
+            # E26 — extra characters treated as word chars for double-click selection
+            "word_chars_extra":  "",
         }
         self.config = self.load()
         self._save_timer: threading.Timer | None = None

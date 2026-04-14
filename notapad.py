@@ -80,6 +80,9 @@ class Notapad:
         self._file_mtime    = None     # E23 — mtime at last open/save for change detection
         self._tab_size      = self.settings.get("tab_size")    # E22
         self._use_spaces    = self.settings.get("use_spaces")  # E22
+        self._word_chars_extra = self.settings.get("word_chars_extra")  # E26
+        self._dirty_line    = None  # E6 — last-edited line for dirty-region highlighting
+        self._loading       = False # E19 — guard against concurrent file loads
         # E2 — search result cache invalidation
         self._text_version       = 0
         self._search_cache_key   = None
@@ -101,6 +104,7 @@ class Notapad:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.bind_all("<Button-1>", self._on_app_click, add="+")
         self._schedule_ln_update()
+        self._apply_initial_settings()  # apply saved display toggles now that all widgets exist
 
     def _on_app_click(self, event):
         if self.active_antique:
@@ -219,6 +223,21 @@ class Notapad:
         self.settings.set("theme_mode", mode)
         self.apply_theme()
 
+    def _apply_initial_settings(self):
+        """Apply persisted display toggles that require all widgets to exist first.
+        Called once at the end of __init__; also safe to call again after a theme reset."""
+        # Word-wrap: text widget is always created with wrap=WORD; honour saved False
+        if not self.word_wrap.get():
+            self.text.config(wrap=tk.NONE)
+            self.scrollbar_x.pack(side=tk.BOTTOM, fill=tk.X, before=self.pane)
+        # Line numbers: gutter is always packed in _build_editor; honour saved False
+        if not self.show_line_nums.get():
+            self.gutter.pack_forget()
+            self.gutter_sep.pack_forget()
+        # Status bar: packed by default; honour saved False
+        if not self.status_bar_visible:
+            self.statusbar.pack_forget()
+
     def _build_results_panel(self):
         self.results_frame = tk.Frame(self.pane, height=190)
         self.results_frame.pack_propagate(False)
@@ -277,6 +296,7 @@ class Notapad:
                 {"type":"cmd", "label":"Recent Files ▶","acc":"",            "cmd":self._open_recent_menu},
                 {"type":"cmd", "label":"Save",         "acc":"Ctrl+S",       "cmd":self.save_file},
                 {"type":"cmd", "label":"Save As…",     "acc":"Ctrl+Shift+S", "cmd":self.save_as_file},
+                {"type":"cmd", "label":"Close File",   "acc":"Ctrl+W",       "cmd":self.close_file},
                 {"type":"sep"},
                 {"type":"cmd", "label":"Exit",         "cmd":self.on_close},
             ],
@@ -290,7 +310,8 @@ class Notapad:
                 {"type":"cmd", "label":"Delete", "acc":"Del", "cmd":self.delete_selection},
                 {"type":"sep"},
                 {"type":"cmd", "label":"Find…", "acc":"Ctrl+F", "cmd":self.open_find_bar},
-                {"type":"cmd", "label":"Find Next", "acc":"F3", "cmd":self.find_next},
+                {"type":"cmd", "label":"Find Next", "acc":"F3",           "cmd":self.find_next},
+                {"type":"cmd", "label":"Find All",  "acc":"Ctrl+Shift+F", "cmd":self.open_find_all},
                 {"type":"cmd", "label":"Replace…", "acc":"Ctrl+H", "cmd":lambda: dialogs.open_replace(self)},
                 {"type":"cmd", "label":"Go To Line…", "acc":"Ctrl+G", "cmd":lambda: dialogs.goto_line(self)},
                 {"type":"sep"},
@@ -307,6 +328,11 @@ class Notapad:
                 {"type":"cmd",   "label":"Tab Size: 4",  "cmd":lambda: self._set_tab_size(4)},
                 {"type":"cmd",   "label":"Tab Size: 8",  "cmd":lambda: self._set_tab_size(8)},
                 {"type":"cmd",   "label":"Use Tab Character", "cmd":lambda: self._set_tab_size(self._tab_size, spaces=False)},
+                {"type":"sep"},
+                {"type":"cmd",   "label":"Word Select: Standard",          "cmd":lambda: self._set_word_chars("")},
+                {"type":"cmd",   "label":"Word Select: + Hyphens",         "cmd":lambda: self._set_word_chars("-")},
+                {"type":"cmd",   "label":"Word Select: + Dots",            "cmd":lambda: self._set_word_chars(".")},
+                {"type":"cmd",   "label":"Word Select: + Hyphens & Dots",  "cmd":lambda: self._set_word_chars("-.")},
             ],
             "View": [
                 {"type":"cmd", "label":"Zoom In", "acc":"Ctrl+=", "cmd":self.zoom_in},
@@ -467,6 +493,10 @@ class Notapad:
         # Close button
         tk.Button(self.find_bar_inner, text="✕", command=self.close_find_bar,
                   **btn_cfg).pack(side=tk.RIGHT, padx=(4, 0))
+        # Find All button — populates the results panel below the editor
+        tk.Button(self.find_bar_inner, text="Find All",
+                  command=lambda: self.find_all(self._find_bar_var.get()),
+                  **btn_cfg).pack(side=tk.RIGHT, padx=(4, 0))
 
         # Wire up live search
         self._find_bar_var.trace_add("write", lambda *_: self._on_find_bar_type())
@@ -503,6 +533,13 @@ class Notapad:
         self._match_positions = []
         self._match_current   = -1
         self.text.focus_set()
+
+    def open_find_all(self):
+        """Open the find bar (if needed) and immediately populate results."""
+        self.open_find_bar()
+        term = self._find_bar_var.get()
+        if term:
+            self.find_all(term)
 
     def _on_find_bar_type(self):
         """Debounced live search triggered by every keystroke in the find bar."""
@@ -615,6 +652,7 @@ class Notapad:
         t.bind("<Control-o>",     lambda e: (self.open_file(),    "break")[1])
         t.bind("<Control-s>",     lambda e: (self.save_file(),    "break")[1])
         t.bind("<Control-S>",     lambda e: (self.save_as_file(), "break")[1])
+        t.bind("<Control-w>",     lambda e: (self.close_file(),   "break")[1])
         t.bind("<Control-f>",     lambda e: (self.open_find_bar(),          "break")[1])
         t.bind("<Control-h>",     lambda e: (dialogs.open_replace(self), "break")[1])
         t.bind("<Control-g>",     lambda e: (dialogs.goto_line(self),    "break")[1])
@@ -628,12 +666,16 @@ class Notapad:
         r.bind("<Control-o>",     lambda e: self.open_file())
         r.bind("<Control-s>",     lambda e: self.save_file())
         r.bind("<Control-S>",     lambda e: self.save_as_file())
+        r.bind("<Control-w>",     lambda e: self.close_file())
         r.bind("<F3>",            lambda e: self.find_next())
         r.bind("<Control-f>",     lambda e: self.open_find_bar())
+        t.bind("<Control-F>",     lambda e: (self.open_find_all(), "break")[1])
+        r.bind("<Control-F>",     lambda e: self.open_find_all())
 
         t.bind("<Return>",        self._auto_indent)   # E21 — auto-indent
         t.bind("<Tab>",           self._handle_tab)       # E22 — smart tab
         t.bind("<Shift-Tab>",     self._handle_shift_tab) # E22 — dedent
+        t.bind("<Double-Button-1>", self._handle_double_click)  # E26 — custom word boundaries
         # E2 — invalidate search cache when content changes
         t.bind("<<Modified>>",    self._on_text_modified)
 
@@ -674,7 +716,7 @@ class Notapad:
     def _redraw_gutter(self):
         self._ln_after = None
         if not self.show_line_nums.get(): return
-        # E3 — skip gutter redraws for very large files (Tcl dlineinfo loop is expensive)
+        # E3 — skip gutter redraws for very large files
         try:
             if int(self.text.count("1.0", "end", "chars")[0] or 0) > 300_000:
                 return
@@ -683,16 +725,41 @@ class Notapad:
         c = self.gutter
         c.delete("all")
         w = c.winfo_width()
+        h = self.text.winfo_height()
+
+        # E4 — single pixel-probe pass using @0,y stepping.
+        # Instead of iterating logical line numbers and calling dlineinfo() per line
+        # (one Tcl round-trip each), we step through the viewport by line-height pixels.
+        # text.index("@0,y") maps pixel → character index in one call; text.bbox("@0,y")
+        # gives the exact pixel row bounds.  For each *unique* logical line we encounter
+        # we draw the number once (at its first visible visual row).  This handles
+        # word-wrap correctly and reduces Tcl round-trips to O(visible visual rows).
         try:
-            first = int(self.text.index("@0,0").split(".")[0])
-            last  = int(self.text.index(f"@0,{self.text.winfo_height()}").split(".")[0])
-        except Exception: return
-        for ln in range(first, last + 2):
-            di = self.text.dlineinfo(f"{ln}.0")
-            if not di: continue
-            _, y, _, _, baseline = di
-            c.create_text(w - 6, y + baseline, anchor="e", text=str(ln),
-                          fill=self.current_theme["fg_gutter"], font=self._current_font)
+            lh = max(self._current_font.metrics("linespace"), 4)
+        except Exception:
+            lh = 16
+
+        fill   = self.current_theme["fg_gutter"]
+        drawn  = set()   # logical line numbers already drawn
+        y      = 0
+        while y <= h:
+            try:
+                idx = self.text.index(f"@0,{y}")
+                ln  = int(idx.split(".")[0])
+            except Exception:
+                break
+            if ln not in drawn:
+                try:
+                    bb = self.text.bbox(f"@0,{y}")
+                    if bb:
+                        _, row_y, _, row_h = bb
+                        c.create_text(w // 2, row_y + row_h // 2, anchor="center",
+                                      text=str(ln), fill=fill,
+                                      font=self._current_font)
+                        drawn.add(ln)
+                except Exception:
+                    pass
+            y += lh
 
     def _on_key(self, event=None):
         if not self.is_modified:
@@ -703,6 +770,11 @@ class Notapad:
         self._schedule_highlight()
         self._schedule_bracket_match()  # E16
         self._clear_word_highlight()    # E13 — clear immediately on keystroke
+        # E6 — record the edited line so apply_highlight() can extend its region
+        try:
+            self._dirty_line = int(self.text.index(tk.INSERT).split(".")[0])
+        except Exception:
+            pass
 
     def _update_status(self, event=None):
         try:
@@ -776,6 +848,7 @@ class Notapad:
         x  = self.status_lang.winfo_rootx() - self.root.winfo_rootx()
         y  = self.status_lang.winfo_rooty() - self.root.winfo_rooty() - mh
         menu.place(x=max(0, x), y=max(0, y))
+        return "break"  # prevent _on_app_click (bind_all) from immediately closing the menu
 
     def _detect_and_set_language(self, path: str):
         ext  = os.path.splitext(path)[1].lower()
@@ -798,6 +871,22 @@ class Notapad:
         self._file_mtime    = None          # E23
         self.status_eol.config(text="LF")   # E17
         self.status_enc.config(text="UTF-8") # E18
+        self.set_language(None)
+        self._update_title()
+        self._update_status()
+        self._schedule_ln_update()
+
+    def close_file(self):
+        """B6 — close the current file and return to an Untitled blank state."""
+        if not self._confirm_discard(): return
+        self.text.delete("1.0", tk.END)
+        self.current_file   = None
+        self.is_modified    = False
+        self._line_ending   = "\n"
+        self._encoding      = "utf-8"
+        self._file_mtime    = None
+        self.status_eol.config(text="LF")
+        self.status_enc.config(text="UTF-8")
         self.set_language(None)
         self._update_title()
         self._update_status()
@@ -843,6 +932,13 @@ class Notapad:
                 content = content.replace("\r\n", "\n").replace("\r", "\n")
 
             self.text.delete("1.0", tk.END)
+
+            # E19 — chunked progressive loading for large files (> 5 MB raw bytes)
+            _LARGE_FILE_BYTES = 5 * 1024 * 1024
+            if len(raw) > _LARGE_FILE_BYTES:
+                self._load_large_file_chunked(content, path, eol_label, enc)
+                return
+
             self.text.insert("1.0", content)
             self.text.mark_set(tk.INSERT, "1.0")
             self.current_file = path
@@ -860,6 +956,62 @@ class Notapad:
             self._detect_and_set_language(path)
             self._push_recent(path)          # E9
         except Exception as exc: messagebox.showerror(APP_NAME, f"Could not open file:\n{exc}")
+
+    def _load_large_file_chunked(self, content: str, path: str,
+                                  eol_label: str, enc: str):
+        """E19 — insert a large file in 50k-char chunks via after_idle() so the
+        UI thread is never blocked for more than a few milliseconds at a time.
+        Progress is shown in the status bar as 'Loading… N%'.
+        Auto-disables syntax highlighting (file will exceed E3's 300k-char guard anyway).
+        """
+        _CHUNK = 50_000  # characters per idle tick
+
+        # Split on line boundaries so we never cut in the middle of a line
+        chunks: list[str] = []
+        remaining = content
+        while remaining:
+            if len(remaining) <= _CHUNK:
+                chunks.append(remaining)
+                break
+            cut = remaining.rfind("\n", 0, _CHUNK)
+            if cut == -1:
+                cut = _CHUNK
+            chunks.append(remaining[:cut + 1])
+            remaining = remaining[cut + 1:]
+
+        total = len(chunks)
+        self._loading = True
+        self.status_pos.config(text="Loading…")
+        self.status_words.config(text="0%")
+
+        def _insert(i: int):
+            if not self._loading:
+                return  # aborted by a new open_file() call
+            if i >= total:
+                # ── finalization ─────────────────────────────────────────────
+                self._loading = False
+                self.text.mark_set(tk.INSERT, "1.0")
+                self.current_file = path
+                self.is_modified  = False
+                self.status_eol.config(text=eol_label)
+                self.status_enc.config(text=enc.upper().replace("-", ""))
+                try:
+                    self._file_mtime = os.path.getmtime(path)
+                except Exception:
+                    self._file_mtime = None
+                self._update_title()
+                self._update_status()
+                self._schedule_ln_update()
+                self._detect_and_set_language(path)
+                self._push_recent(path)
+                return
+
+            self.text.insert(tk.END, chunks[i])
+            pct = int((i + 1) / total * 100)
+            self.status_words.config(text=f"{pct}%")
+            self.root.after_idle(lambda: _insert(i + 1))
+
+        self.root.after_idle(lambda: _insert(0))
 
     def save_file(self) -> bool:
         if not self.current_file: return self.save_as_file()
@@ -1080,6 +1232,47 @@ class Notapad:
         self.settings.set("tab_size",   size)
         self.settings.set("use_spaces", spaces)
 
+    # ── E26 — adjustable double-click word boundaries ─────────────────────────
+
+    def _handle_double_click(self, event):
+        """E26 — select the word under the click using the configurable word-char set.
+        Returns 'break' to suppress Tk's default selection only when we successfully
+        selected a word; falls through to default for non-word characters."""
+        try:
+            idx      = self.text.index(f"@{event.x},{event.y}")
+            line, col = map(int, idx.split("."))
+            line_text = self.text.get(f"{line}.0", f"{line}.end")
+        except Exception:
+            return  # let default handle it
+
+        extra = re.escape(self._word_chars_extra)
+        pat   = re.compile(r"[a-zA-Z0-9_" + extra + r"]")
+
+        if col >= len(line_text) or not pat.match(line_text[col]):
+            return  # clicked on non-word char — let default selection happen
+
+        # Walk left to find word start
+        start = col
+        while start > 0 and pat.match(line_text[start - 1]):
+            start -= 1
+        # Walk right to find word end
+        end = col
+        while end < len(line_text) and pat.match(line_text[end]):
+            end += 1
+
+        self.text.tag_remove(tk.SEL, "1.0", tk.END)
+        self.text.tag_add(tk.SEL, f"{line}.{start}", f"{line}.{end}")
+        self.text.mark_set(tk.INSERT, f"{line}.{end}")
+        self.text.see(tk.INSERT)
+        # Trigger word highlight for the freshly selected word (E25)
+        self._schedule_word_highlight()
+        return "break"
+
+    def _set_word_chars(self, extra: str):
+        """E26 — update the extra word characters used for double-click selection."""
+        self._word_chars_extra = extra
+        self.settings.set("word_chars_extra", extra)
+
     # ── E2 — search cache invalidation ────────────────────────────────────────
 
     def _on_text_modified(self, event=None):
@@ -1183,8 +1376,22 @@ class Notapad:
                     "acc": path if len(path) <= 55 else "…" + path[-52:],
                     "cmd": lambda p=path: self.open_file(p),
                 })
+            # B6 — allow clearing the MRU list from within the submenu
+            items.append({"type": "sep"})
+            items.append({
+                "type": "cmd",
+                "label": "Clear Recent Files",
+                "cmd": self._clear_recent_files,
+            })
         self.active_antique = AntiqueMenu(self, file_btn, items)
         self.menu_armed = True
+
+    def _clear_recent_files(self):
+        """B6 — wipe the MRU list and persist the empty state."""
+        self._recent_files = []
+        self.settings.set("recent_files", [])
+        if self.active_antique:
+            self.active_antique.close()
 
     # ── E13 — passive word highlight ──────────────────────────────────────────
 
@@ -1203,39 +1410,48 @@ class Notapad:
         self._wh_after = None
         self.text.tag_remove("word_hi", "1.0", tk.END)
 
-        # Don't fire if there is an active selection
+        # ── E25 / E13 — determine the word / phrase to highlight ──────────────
+        # Priority: active selection (E25) → word under cursor (E13)
+        word           = None
+        use_whole_word = True
+
         try:
-            self.text.index(tk.SEL_FIRST)
-            return  # selection exists — bail
+            sel_start = self.text.index(tk.SEL_FIRST)
+            sel_end   = self.text.index(tk.SEL_LAST)
+            selected  = self.text.get(sel_start, sel_end)
+            # E25: only highlight if selection is non-trivial, single-line, ≤200 chars
+            if selected and "\n" not in selected and 2 <= len(selected) <= 200:
+                word = selected
+                # Whole-word matching only when the selection is a pure identifier
+                use_whole_word = bool(re.match(r"^\w+$", word))
         except tk.TclError:
-            pass
+            pass  # no selection — fall through to E13
 
-        # Get the word boundaries under the cursor
+        if word is None:
+            # E13 — cursor mode: highlight the word the cursor is resting on
+            try:
+                word_start = self.text.index("insert wordstart")
+                word_end   = self.text.index("insert wordend")
+                word = self.text.get(word_start, word_end).strip()
+            except Exception:
+                return
+            if len(word) < 2 or not re.match(r"^\w+$", word):
+                return
+            use_whole_word = True
+
+        # ── viewport-scoped search (±20 lines) ────────────────────────────────
         try:
-            word_start = self.text.index("insert wordstart")
-            word_end   = self.text.index("insert wordend")
-            word = self.text.get(word_start, word_end).strip()
-        except Exception:
-            return
-
-        # Only highlight meaningful words (≥2 chars, alphanumeric/underscore only)
-        if len(word) < 2 or not re.match(r"^\w+$", word):
-            return
-
-        # Scope to viewport ±20 lines for performance
-        try:
-            first = self.text.index("@0,0")
-            last  = self.text.index(f"@0,{self.text.winfo_height()}")
+            first      = self.text.index("@0,0")
+            last       = self.text.index(f"@0,{self.text.winfo_height()}")
             scan_start = self.text.index(f"{first} - 20 lines linestart")
             scan_end   = self.text.index(f"{last} + 20 lines lineend")
         except Exception:
             return
 
-        # Whole-word search using Tcl regexp
-        pattern = r"\b" + re.escape(word) + r"\b"
+        pattern   = (r"\b" + re.escape(word) + r"\b") if use_whole_word else re.escape(word)
         count_var = tk.IntVar()
-        idx = scan_start
-        hits = 0
+        idx       = scan_start
+        hits      = 0
         try:
             while True:
                 pos = self.text.search(pattern, idx, scan_end,
@@ -1249,7 +1465,7 @@ class Notapad:
                 self.text.tag_add("word_hi", pos, end)
                 idx = end
                 hits += 1
-                if hits > 500:   # safety cap
+                if hits > 500:
                     break
         except Exception:
             pass
@@ -1262,7 +1478,7 @@ class Notapad:
             self.scrollbar_x.pack_forget()
         else:
             self.text.config(wrap=tk.NONE)
-            self.scrollbar_x.pack(side=tk.BOTTOM, fill=tk.X, before=self.editor_frame)
+            self.scrollbar_x.pack(side=tk.BOTTOM, fill=tk.X, before=self.pane)
         self.settings.set("word_wrap", self.word_wrap.get())
         self._schedule_ln_update()
 
