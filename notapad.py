@@ -27,6 +27,13 @@ class Notapad:
         self.root.geometry("980x700")
         self.root.minsize(480, 320)
 
+        # Set application icon
+        if os.path.exists("notapad.ico"):
+            try:
+                self.root.iconbitmap("notapad.ico")
+            except Exception:
+                pass
+
         # Set nice menu / dialog font BEFORE building menus
         root.option_add("*Menu.font",     "Segoe\\ UI 10")
         root.option_add("*Dialog.font",   "Segoe\\ UI 10")
@@ -48,7 +55,7 @@ class Notapad:
         self.is_modified              = False
         self.search_window: tk.Toplevel | None = None
         
-        self.status_bar_visible       = self.settings.get("status_bar_visible")
+        self.status_bar_visible       = tk.BooleanVar(value=self.settings.get("status_bar_visible"))
         self.word_wrap                = tk.BooleanVar(value=self.settings.get("word_wrap"))
         self.show_line_nums           = tk.BooleanVar(value=self.settings.get("show_line_nums"))
         self._language: str | None    = None
@@ -57,6 +64,7 @@ class Notapad:
 
         self._font_family = self.settings.get("font_family")
         self._font_size   = self.settings.get("font_size")
+        self._zoom_level  = 0
         self._current_font = font.Font(family=self._font_family, size=self._font_size)
 
         self._match_positions: list[tuple[str,str]] = []
@@ -226,17 +234,13 @@ class Notapad:
     def _apply_initial_settings(self):
         """Apply persisted display toggles that require all widgets to exist first.
         Called once at the end of __init__; also safe to call again after a theme reset."""
-        # Word-wrap: text widget is always created with wrap=WORD; honour saved False
-        if not self.word_wrap.get():
-            self.text.config(wrap=tk.NONE)
-            self.scrollbar_x.pack(side=tk.BOTTOM, fill=tk.X, before=self.pane)
-        # Line numbers: gutter is always packed in _build_editor; honour saved False
-        if not self.show_line_nums.get():
-            self.gutter.pack_forget()
-            self.gutter_sep.pack_forget()
-        # Status bar: packed by default; honour saved False
-        if not self.status_bar_visible:
-            self.statusbar.pack_forget()
+        # Ensure the toggle commands are executed to match the state of the BooleanVars
+        # (which were initialized from the settings dictionary in __init__).
+        self.toggle_wrap()
+        self._toggle_line_numbers()
+        self.toggle_statusbar()
+        # Ensure zoom is correct from startup
+        self._apply_font()
 
     def _build_results_panel(self):
         self.results_frame = tk.Frame(self.pane, height=190)
@@ -341,7 +345,7 @@ class Notapad:
                 {"type":"sep"},
                 {"type":"cmd", "label":"Appearance", "cmd":lambda: dialogs.show_appearance_submenu(self)},
                 {"type":"sep"},
-                {"type":"cmd", "label":"Toggle Status Bar", "cmd":self.toggle_statusbar},
+                {"type":"check", "label":"Status Bar", "var":self.status_bar_visible, "cmd":self.toggle_statusbar},
             ],
             "Help": [
                 {"type":"cmd", "label":"About Notapad", "cmd":lambda: dialogs.show_about(self)},
@@ -716,6 +720,10 @@ class Notapad:
     def _redraw_gutter(self):
         self._ln_after = None
         if not self.show_line_nums.get(): return
+        
+        # Ensure latest layout measurements before drawing
+        self.root.update_idletasks()
+        
         # E3 — skip gutter redraws for very large files
         try:
             if int(self.text.count("1.0", "end", "chars")[0] or 0) > 300_000:
@@ -726,6 +734,11 @@ class Notapad:
         c.delete("all")
         w = c.winfo_width()
         h = self.text.winfo_height()
+        
+        if w <= 1 or h <= 1:
+            # Layout not yet ready; reschedule for a later tick
+            self._schedule_ln_update()
+            return
 
         # E4 — single pixel-probe pass using @0,y stepping.
         # Instead of iterating logical line numbers and calling dlineinfo() per line
@@ -792,16 +805,21 @@ class Notapad:
         self.root.title(f"{base}{dirty} — {APP_NAME}")
 
     def _apply_font(self):
-        self._current_font.config(family=self._font_family, size=self._font_size)
+        eff_size = max(6, self._font_size + self._zoom_level)
+        self._current_font.config(family=self._font_family, size=eff_size)
         self.text.config(font=self._current_font)
         bold_tags = {"keyword", "tag"}
         for tag in THEMES["light"]["syn"].keys():
             w = "bold" if tag in bold_tags else "normal"
             self.text.tag_configure(tag, font=font.Font(font=self._current_font, weight=w))
-        pct = round(self._font_size / 11 * 100)
+        
+        pct = round(eff_size / self._font_size * 100)
         self.status_zoom.config(text=f"{pct}%")
+        # PERSISTENCE: Save the base font settings. 
+        # Since zooming only modifies self._zoom_level, self._font_size remains 
+        # at its base value and will be restored as 100% on next launch.
         self.settings.set("font_family", self._font_family)
-        self.settings.set("font_size", self._font_size)
+        self.settings.set("font_size",   self._font_size)
         self._schedule_ln_update()
 
     def _schedule_highlight(self):
@@ -1473,34 +1491,63 @@ class Notapad:
     # ── toggle_wrap lives here ─────────────────────────────────────────────────
 
     def toggle_wrap(self):
+        # We unmanage the horizontal scrollbar if wrap is ON.
+        # If wrap is OFF, we pack it at the bottom.
         if self.word_wrap.get():
             self.text.config(wrap=tk.WORD)
-            self.scrollbar_x.pack_forget()
+            if self.scrollbar_x.winfo_ismapped():
+                self.scrollbar_x.pack_forget()
         else:
             self.text.config(wrap=tk.NONE)
-            self.scrollbar_x.pack(side=tk.BOTTOM, fill=tk.X, before=self.pane)
+            # Pack at the very bottom of the window, above status bar but below the pane
+            if not self.scrollbar_x.winfo_ismapped():
+                self.scrollbar_x.pack(side=tk.BOTTOM, fill=tk.X, before=self.pane)
+        
         self.settings.set("word_wrap", self.word_wrap.get())
         self._schedule_ln_update()
 
     def _toggle_line_numbers(self):
+        """Toggle the gutter and separator visibility by re-packing the editor frame.
+        We unpack ALL children and repack them in a guaranteed order to avoid
+        incorrect overlap or layout calculation race conditions."""
+        # Unpack all to ensure clean slate in the editor_frame
+        self.gutter.pack_forget()
+        self.gutter_sep.pack_forget()
+        self.scrollbar_y.pack_forget()
+        self.text.pack_forget()
+
         if self.show_line_nums.get():
-            self.gutter.pack(side=tk.LEFT, fill=tk.Y, before=self.gutter_sep)
-            self.gutter_sep.pack(side=tk.LEFT, fill=tk.Y, before=self.text)
-        else:
-            self.gutter.pack_forget()
-            self.gutter_sep.pack_forget()
+            self.gutter.pack(side=tk.LEFT, fill=tk.Y)
+            self.gutter_sep.pack(side=tk.LEFT, fill=tk.Y)
+        
+        # Always pack text and scrollbar back
+        self.text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.scrollbar_y.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Force layout update so the redraw logic sees valid dimensions immediately
+        self.root.update_idletasks()
+        
         self.settings.set("show_line_nums", self.show_line_nums.get())
         self._schedule_ln_update()
 
-    def zoom_in(self): self._font_size = min(self._font_size + 1, 72); self._apply_font()
-    def zoom_out(self): self._font_size = max(self._font_size - 1, 6); self._apply_font()
-    def zoom_reset(self): self._font_size = 11; self._apply_font()
+    def zoom_in(self):
+        self._zoom_level = min(self._zoom_level + 1, 60)
+        self._apply_font()
+
+    def zoom_out(self):
+        self._zoom_level = max(self._zoom_level - 1, -self._font_size + 6)
+        self._apply_font()
+
+    def zoom_reset(self):
+        self._zoom_level = 0
+        self._apply_font()
 
     def toggle_statusbar(self):
-        if self.status_bar_visible: self.statusbar.pack_forget()
-        else: self.statusbar.pack(side=tk.BOTTOM, fill=tk.X)
-        self.status_bar_visible = not self.status_bar_visible
-        self.settings.set("status_bar_visible", self.status_bar_visible)
+        if self.status_bar_visible.get():
+            self.statusbar.pack(side=tk.BOTTOM, fill=tk.X)
+        else:
+            self.statusbar.pack_forget()
+        self.settings.set("status_bar_visible", self.status_bar_visible.get())
 
     def on_close(self):
         if self._confirm_discard():
