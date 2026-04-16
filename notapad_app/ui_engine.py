@@ -14,7 +14,7 @@ def apply_windows_title_bar(win, dark: bool):
         hwnd = get_parent(win.winfo_id())
         rendering_policy = ctypes.c_int(2 if dark else 0)
         set_window_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ctypes.byref(rendering_policy), ctypes.sizeof(rendering_policy))
-    except:
+    except Exception:
         pass
 
 class AntiqueMenu(tk.Frame):

@@ -96,24 +96,28 @@ def open_find(app):
             app.search_after_id = app.root.after(200, lambda: app._do_search(fv.get()))
     fv.trace_add("write", on_type)
 
-    _create_styled_button(footer, "Cancel", top.destroy, t).pack(side=tk.RIGHT, padx=5)
-    _create_styled_button(footer, "Find All", lambda: app.find_all(fv.get()), t).pack(side=tk.RIGHT, padx=5)
-    _create_styled_button(footer, "Find Next", do_next, t, is_primary=True).pack(side=tk.RIGHT, padx=5)
-    
-    # Title Bar based on theme
-    apply_windows_title_bar(top, _is_dark_mode(app))
-    
-    top.update_idletasks()
-    app._center_window(top)
-    
-    ent.bind("<Return>", lambda e: do_next())
-    top.bind("<Escape>", lambda e: top.destroy())
-
     def _cleanup():
         app.search_count_lbl = None
         app.search_window = None
         app._clear_highlights()
-    top.protocol("WM_DELETE_WINDOW", lambda: (top.destroy(), _cleanup()))
+
+    def _close():
+        _cleanup()
+        top.destroy()
+
+    _create_styled_button(footer, "Cancel", _close, t).pack(side=tk.RIGHT, padx=5)
+    _create_styled_button(footer, "Find All", lambda: app.find_all(fv.get()), t).pack(side=tk.RIGHT, padx=5)
+    _create_styled_button(footer, "Find Next", do_next, t, is_primary=True).pack(side=tk.RIGHT, padx=5)
+
+    # Title Bar based on theme
+    apply_windows_title_bar(top, _is_dark_mode(app))
+
+    top.update_idletasks()
+    app._center_window(top)
+
+    ent.bind("<Return>", lambda e: do_next())
+    top.bind("<Escape>", lambda e: _close())
+    top.protocol("WM_DELETE_WINDOW", _close)
 
 def open_replace(app):
     if app.search_window and app.search_window.winfo_exists():
@@ -272,7 +276,16 @@ def open_replace(app):
 
     fv.trace_add("write", on_type)
 
-    _create_styled_button(footer, "Cancel",      top.destroy,     t).pack(side=tk.RIGHT, padx=5)
+    def _cleanup():
+        app.search_count_lbl = None
+        app.search_window    = None
+        app._clear_highlights()
+
+    def _close():
+        _cleanup()
+        top.destroy()
+
+    _create_styled_button(footer, "Cancel",      _close,          t).pack(side=tk.RIGHT, padx=5)
     _create_styled_button(footer, "Replace All",  do_replace_all,  t).pack(side=tk.RIGHT, padx=5)
     _create_styled_button(footer, "Replace",      do_replace,      t, is_primary=True).pack(side=tk.RIGHT, padx=5)
 
@@ -281,12 +294,8 @@ def open_replace(app):
     app._center_window(top)
     app._do_search(fv.get())
 
-    def _cleanup():
-        app.search_count_lbl = None
-        app.search_window    = None
-        app._clear_highlights()
-    top.protocol("WM_DELETE_WINDOW", lambda: (top.destroy(), _cleanup()))
-    top.bind("<Escape>", lambda e: top.destroy())
+    top.protocol("WM_DELETE_WINDOW", _close)
+    top.bind("<Escape>", lambda e: _close())
     fe.bind("<Return>",  lambda e: do_find())
 
 def goto_line(app):

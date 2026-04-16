@@ -181,6 +181,7 @@ class Notapad:
             self.text.tag_configure(tag, foreground=color, font=font.Font(font=self._current_font, weight=w))
         
         self.statusbar.configure(bg=t["bg_status"])
+        self.status_top_sep.configure(bg=t["sep"])
         for child in self.statusbar.winfo_children():
             if isinstance(child, tk.Label): child.configure(bg=t["bg_status"], fg=t["fg_status"])
             elif isinstance(child, tk.Frame) and child.winfo_width() == 1: child.configure(bg=t["sep"])
@@ -418,7 +419,8 @@ class Notapad:
         self.statusbar = tk.Frame(self.root, height=22)
         self.statusbar.pack(side=tk.BOTTOM, fill=tk.X)
         self.statusbar.pack_propagate(False)
-        tk.Frame(self.statusbar, height=1, bg="#e0e0e0").pack(side=tk.TOP, fill=tk.X)
+        self.status_top_sep = tk.Frame(self.statusbar, height=1)
+        self.status_top_sep.pack(side=tk.TOP, fill=tk.X)
 
         uf = ("Segoe UI", 9)
         def _sep(): tk.Frame(self.statusbar, width=1).pack(side=tk.LEFT, fill=tk.Y, pady=3)
@@ -675,6 +677,8 @@ class Notapad:
         r.bind("<Control-f>",     lambda e: self.open_find_bar())
         t.bind("<Control-F>",     lambda e: (self.open_find_all(), "break")[1])
         r.bind("<Control-F>",     lambda e: self.open_find_all())
+        r.bind("<Control-h>",     lambda e: dialogs.open_replace(self))
+        r.bind("<Control-g>",     lambda e: dialogs.goto_line(self))
 
         t.bind("<Return>",        self._auto_indent)   # E21 — auto-indent
         t.bind("<Tab>",           self._handle_tab)       # E22 — smart tab
@@ -757,13 +761,13 @@ class Notapad:
         y      = 0
         while y <= h:
             try:
-                idx = self.text.index(f"@0,{y}")
+                idx = self.text.index(f"@10,{y}")
                 ln  = int(idx.split(".")[0])
             except Exception:
                 break
             if ln not in drawn:
                 try:
-                    bb = self.text.bbox(f"@0,{y}")
+                    bb = self.text.bbox(f"@10,{y}")
                     if bb:
                         _, row_y, _, row_h = bb
                         c.create_text(w // 2, row_y + row_h // 2, anchor="center",
@@ -1049,7 +1053,9 @@ class Notapad:
             except Exception:
                 self._file_mtime = None
             return True
-        except Exception: return False
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, f"Could not save file:\n{exc}")
+            return False
 
     def save_as_file(self) -> bool:
         path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")])
@@ -1597,7 +1603,10 @@ def main():
             except Exception:
                 pass
 
-    root.mainloop()
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        pass
 
 if __name__ == "__main__":
     main()
