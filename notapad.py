@@ -28,9 +28,13 @@ class Notapad:
         self.root.minsize(480, 320)
 
         # Set application icon
-        if os.path.exists("notapad.ico"):
+        icon_path = "notapad.ico"
+        # When running as a PyInstaller exe, use sys._MEIPASS to find bundled resources
+        if hasattr(sys, "_MEIPASS"):
+            icon_path = os.path.join(sys._MEIPASS, "notapad.ico")
+        if os.path.exists(icon_path):
             try:
-                self.root.iconbitmap("notapad.ico")
+                self.root.iconbitmap(icon_path)
             except Exception:
                 pass
 
